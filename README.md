@@ -2,8 +2,7 @@
 
 **Rhyme Rarity Checker** is an AI-powered tool that evaluates how well two words rhyme and how rare that rhyme pairing is in published literature, music, and poetry. Built with **Gradio** and powered by **OpenAI's GPT-3.5-turbo**, it distinguishes between rhyme types such as *perfect, slant, assonance, consonance*, and *forced*.
 
-👉 **Live Demo** on Hugging Face Spaces: [Try it here](https://huggingface.co/spaces/your-username/RhymeRater)  
-*(Replace with your actual Space URL)*
+👉 **Live Demo** on Hugging Face Spaces: [Try it here]([https://huggingface.co/spaces/your-username/RhymeRater])
 
 ---
 
