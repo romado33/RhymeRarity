@@ -20,6 +20,10 @@ class MissingAPIKeyError(Exception):
     """Raised when the OpenAI API key cannot be found."""
 
 
+class OpenAIClientError(Exception):
+    """Raised when the OpenAI client cannot be initialized."""
+
+
 class OpenAIRequestError(Exception):
     """Raised when a request to the OpenAI API fails."""
 
@@ -61,7 +65,10 @@ def _get_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise MissingAPIKeyError("OPENAI_API_KEY environment variable not set")
-    return OpenAI(api_key=api_key)
+    try:
+        return OpenAI(api_key=api_key)
+    except Exception as e:  # pragma: no cover - instantiation errors
+        raise OpenAIClientError(str(e)) from e
 
 
 def query_rhyme_score(w1: str, w2: str) -> str:
@@ -82,6 +89,8 @@ def query_rhyme_score(w1: str, w2: str) -> str:
             timeout=10,
         )
         return response.choices[0].message.content
+    except (MissingAPIKeyError, OpenAIClientError):
+        raise
     except Exception as e:  # pragma: no cover - network errors
         raise OpenAIRequestError(str(e)) from e
 
@@ -103,6 +112,9 @@ def analyze_rhyme(word1: str, word2: str) -> tuple[str, str, str, str]:
         result = query_rhyme_score(word1, word2)
     except MissingAPIKeyError:
         msg = "OpenAI API key is missing. Set the OPENAI_API_KEY environment variable."
+        return "", "", msg, ""
+    except OpenAIClientError as e:
+        msg = f"Failed to initialize OpenAI client: {e}"
         return "", "", msg, ""
     except OpenAIRequestError as e:
         msg = f"Network error or timeout contacting OpenAI: {e}"
