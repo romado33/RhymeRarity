@@ -153,10 +153,15 @@ def parse_output(text: str) -> dict[str, str]:
     return result
 
 
-def analyze_rhyme(word1: str, word2: str) -> tuple[str, str, str, str]:
+def analyze_rhyme(
+    word1: str,
+    word2: str,
+    model: str = "gpt-3.5-turbo",
+    temperature: float = 0.7,
+) -> tuple[str, str, str, str]:
     """Wrapper used by Gradio to return parsed rhyme information."""
     try:
-        result = query_rhyme_score(word1, word2)
+        result = query_rhyme_score(word1, word2, model=model, temperature=temperature)
     except MissingAPIKeyError:
         msg = "OpenAI API key is missing. Set the OPENAI_API_KEY environment variable."
         return "", "", msg, ""
@@ -179,11 +184,17 @@ def analyze_rhyme(word1: str, word2: str) -> tuple[str, str, str, str]:
 
 
 def analyze_and_store(
-    word1: str, word2: str, history: deque
+    word1: str,
+    word2: str,
+    history: deque,
+    model: str = "gpt-3.5-turbo",
+    temperature: float = 0.7,
 ) -> tuple[str, str, str, str, list[tuple[str, str, str]], deque]:
     """Analyze rhyme and update the history deque."""
 
-    rhyme_type, rarity, explanation, examples = analyze_rhyme(word1, word2)
+    rhyme_type, rarity, explanation, examples = analyze_rhyme(
+        word1, word2, model=model, temperature=temperature
+    )
     if rhyme_type or rarity or explanation or examples:
         summary = f"{rhyme_type} ({rarity})"
         history.appendleft((word1, word2, summary))
@@ -220,6 +231,18 @@ with gr.Blocks(title="🎤 Rhyme Rarity Checker") as demo:
         with gr.Column():
             word1 = gr.Textbox(label="Word 1")
             word2 = gr.Textbox(label="Word 2")
+            model_dd = gr.Dropdown(
+                label="Model",
+                choices=["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4-turbo"],
+                value="gpt-3.5-turbo",
+            )
+            temp_slider = gr.Slider(
+                minimum=0.0,
+                maximum=1.0,
+                value=0.7,
+                step=0.1,
+                label="Temperature",
+            )
             submit = gr.Button("Analyze")
             rhyme_type = gr.Textbox(label="Rhyme Type")
             rarity = gr.Textbox(label="Rarity Score (0–100)")
@@ -237,7 +260,7 @@ with gr.Blocks(title="🎤 Rhyme Rarity Checker") as demo:
 
     submit.click(
         analyze_and_store,
-        inputs=[word1, word2, history_state],
+        inputs=[word1, word2, history_state, model_dd, temp_slider],
         outputs=[rhyme_type, rarity, explanation, examples, history_table, history_state],
     )
     clear_btn.click(clear_history, inputs=None, outputs=[history_table, history_state])
