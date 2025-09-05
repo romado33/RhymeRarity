@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import textwrap
+from collections import deque
 
 import gradio as gr
 from openai import OpenAI
@@ -103,25 +104,70 @@ def analyze_rhyme(word1: str, word2: str) -> tuple[str, str, str, str]:
     )
 
 
-demo = gr.Interface(
-    fn=analyze_rhyme,
-    inputs=[
-        gr.Textbox(label="Word 1"),
-        gr.Textbox(label="Word 2"),
-    ],
-    outputs=[
-        gr.Textbox(label="Rhyme Type"),
-        gr.Textbox(label="Rarity Score (0–100)"),
-        gr.Textbox(label="Explanation"),
-        gr.Textbox(label="Examples"),
-    ],
-    title="🎤 Rhyme Rarity Checker",
-    description=(
+def analyze_and_store(
+    word1: str, word2: str, history: deque
+) -> tuple[str, str, str, str, list[tuple[str, str, str]], deque]:
+    """Analyze rhyme and update the history deque."""
+
+    rhyme_type, rarity, explanation, examples = analyze_rhyme(word1, word2)
+    if rhyme_type or rarity or explanation or examples:
+        summary = f"{rhyme_type} ({rarity})"
+        history.appendleft((word1, word2, summary))
+    return rhyme_type, rarity, explanation, examples, list(history), history
+
+
+def load_from_history(history: deque, evt: gr.SelectData) -> tuple[str, str]:
+    """Return the word pair from the selected history row."""
+
+    index = evt.index[0]
+    try:
+        word1, word2, _ = list(history)[index]
+        return word1, word2
+    except IndexError:  # pragma: no cover - UI safety
+        return gr.update(), gr.update()
+
+
+def clear_history() -> tuple[list[tuple[str, str, str]], deque]:
+    """Clear the history state."""
+
+    return [], deque(maxlen=5)
+
+
+with gr.Blocks(title="🎤 Rhyme Rarity Checker") as demo:
+    gr.Markdown("# 🎤 Rhyme Rarity Checker")
+    gr.Markdown(
         "Enter two rhyming words and find out how well they rhyme, and how rare "
         "that rhyme pairing is. We consider all types of rhyme: perfect, slant, "
         "assonance, consonance, and forced rhymes."
-    ),
-)
+    )
+    history_state = gr.State(deque(maxlen=5))
+
+    with gr.Row():
+        with gr.Column():
+            word1 = gr.Textbox(label="Word 1")
+            word2 = gr.Textbox(label="Word 2")
+            submit = gr.Button("Analyze")
+            rhyme_type = gr.Textbox(label="Rhyme Type")
+            rarity = gr.Textbox(label="Rarity Score (0–100)")
+            explanation = gr.Textbox(label="Explanation")
+            examples = gr.Textbox(label="Examples")
+
+        with gr.Column():
+            gr.Markdown("### Recent History")
+            history_table = gr.Dataframe(
+                headers=["Word 1", "Word 2", "Result"],
+                datatype=["str", "str", "str"],
+                interactive=False,
+            )
+            clear_btn = gr.Button("Clear History")
+
+    submit.click(
+        analyze_and_store,
+        inputs=[word1, word2, history_state],
+        outputs=[rhyme_type, rarity, explanation, examples, history_table, history_state],
+    )
+    clear_btn.click(clear_history, inputs=None, outputs=[history_table, history_state])
+    history_table.select(load_from_history, inputs=[history_state], outputs=[word1, word2])
 
 
 if __name__ == "__main__":  # pragma: no cover - UI entry point
