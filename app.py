@@ -15,6 +15,14 @@ from collections import deque
 import gradio as gr
 from openai import OpenAI
 
+
+class MissingAPIKeyError(Exception):
+    """Raised when the OpenAI API key cannot be found."""
+
+
+class OpenAIRequestError(Exception):
+    """Raised when a request to the OpenAI API fails."""
+
 PROMPT_TEMPLATE = textwrap.dedent(
     """You are a rhyme expert.
 
@@ -52,7 +60,7 @@ def _get_openai_client() -> OpenAI:
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise EnvironmentError("OPENAI_API_KEY environment variable not set")
+        raise MissingAPIKeyError("OPENAI_API_KEY environment variable not set")
     return OpenAI(api_key=api_key)
 
 
@@ -75,7 +83,7 @@ def query_rhyme_score(w1: str, w2: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:  # pragma: no cover - network errors
-        return f"Error: {e}"
+        raise OpenAIRequestError(str(e)) from e
 
 
 def parse_output(text: str) -> dict[str, str]:
@@ -91,8 +99,15 @@ def parse_output(text: str) -> dict[str, str]:
 
 def analyze_rhyme(word1: str, word2: str) -> tuple[str, str, str, str]:
     """Wrapper used by Gradio to return parsed rhyme information."""
+    try:
+        result = query_rhyme_score(word1, word2)
+    except MissingAPIKeyError:
+        msg = "OpenAI API key is missing. Set the OPENAI_API_KEY environment variable."
+        return "", "", msg, ""
+    except OpenAIRequestError as e:
+        msg = f"Network error or timeout contacting OpenAI: {e}"
+        return "", "", msg, ""
 
-    result = query_rhyme_score(word1, word2)
     if result.startswith("Error"):
         return "", "", result, ""
     parsed = parse_output(result)

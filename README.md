@@ -87,6 +87,13 @@ To use this app, you must have:
 
 ---
 
+## 🛠️ Troubleshooting
+
+- **API key missing**: Ensure the `OPENAI_API_KEY` environment variable is set or provided in a `.env` file.
+- **Network timeout**: Check your internet connection and try again. If the problem persists, the OpenAI service may be temporarily unavailable.
+
+---
+
 ## 🤝 Contributing
 
 Want to suggest rhyme logic improvements, rhyme corpus integration, or add offline fallback?  
