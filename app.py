@@ -16,7 +16,9 @@ import atexit
 from pathlib import Path
 
 import gradio as gr
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
+
+import phonetic
 
 
 class MissingAPIKeyError(Exception):
@@ -138,6 +140,10 @@ def query_rhyme_score(
         return content
     except (MissingAPIKeyError, OpenAIClientError):
         raise
+    except OpenAIError:
+        content = phonetic.fallback_rhyme(w1, w2)
+        _CACHE[key] = content
+        return content
     except Exception as e:  # pragma: no cover - network errors
         raise OpenAIRequestError(str(e)) from e
 
