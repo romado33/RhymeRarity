@@ -73,7 +73,7 @@ It will launch on [http://localhost:7860](http://localhost:7860)
 From `requirements.txt`:
 
 ```
-openai==0.28.1
+openai>=1.3.0
 gradio
 ```
 
