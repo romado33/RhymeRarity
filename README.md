@@ -97,7 +97,8 @@ To use this app, you must have:
 ## 🛠️ Troubleshooting
 
 - **API key missing**: Ensure the `OPENAI_API_KEY` environment variable is set or provided in a `.env` file.
-- **Network timeout**: Check your internet connection and try again. If the problem persists, the OpenAI service may be temporarily unavailable.
+- **Invalid API key**: Double-check that the key has no typos and that your OpenAI account has API access.
+- **Network timeout or connection error**: Verify your internet connection and firewall settings, then try again. The OpenAI service may also be temporarily unavailable.
 
 ---
 
