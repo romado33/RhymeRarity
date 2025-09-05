@@ -11,6 +11,9 @@ from __future__ import annotations
 import os
 import textwrap
 from collections import deque
+import json
+import atexit
+from pathlib import Path
 
 import gradio as gr
 from openai import OpenAI
@@ -18,6 +21,10 @@ from openai import OpenAI
 
 class MissingAPIKeyError(Exception):
     """Raised when the OpenAI API key cannot be found."""
+
+
+class OpenAIClientError(Exception):
+    """Raised when the OpenAI client cannot be initialized."""
 
 
 class OpenAIRequestError(Exception):
@@ -49,6 +56,39 @@ PROMPT_TEMPLATE = textwrap.dedent(
 )
 
 
+CACHE_FILE = Path(__file__).with_name("cache.json")
+_CACHE: dict[tuple[str, str, str, float], str] = {}
+
+
+def _load_cache() -> None:
+    """Load cached results from disk."""
+
+    if CACHE_FILE.exists():
+        try:
+            with CACHE_FILE.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            for key, val in data.items():
+                w1, w2, model, temp = key.split("|")
+                _CACHE[(w1, w2, model, float(temp))] = val
+        except Exception:  # pragma: no cover - cache read errors
+            pass
+
+
+def _save_cache() -> None:
+    """Persist cached results to disk."""
+
+    data = {
+        "|".join([w1, w2, model, str(temp)]): val
+        for (w1, w2, model, temp), val in _CACHE.items()
+    }
+    with CACHE_FILE.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+
+
+_load_cache()
+atexit.register(_save_cache)
+
+
 def _sanitize(word: str) -> str:
     """Strip surrounding whitespace and newlines from a word."""
 
@@ -61,27 +101,43 @@ def _get_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise MissingAPIKeyError("OPENAI_API_KEY environment variable not set")
-    return OpenAI(api_key=api_key)
+    try:
+        return OpenAI(api_key=api_key)
+    except Exception as e:  # pragma: no cover - instantiation errors
+        raise OpenAIClientError(str(e)) from e
 
 
-def query_rhyme_score(w1: str, w2: str) -> str:
-    """Query the OpenAI API for rhyme analysis between two words."""
+def query_rhyme_score(
+    w1: str, w2: str, *, model: str = "gpt-3.5-turbo", temperature: float = 0.7
+) -> str:
+    """Query the OpenAI API for rhyme analysis between two words.
+
+    Results are cached based on the word pair, model, and temperature.
+    """
 
     w1, w2 = _sanitize(w1), _sanitize(w2)
     if not w1 or not w2:
         return "Error: Both words must be provided."
+
+    key = (w1, w2, model, float(temperature))
+    if key in _CACHE:
+        return _CACHE[key]
 
     prompt = PROMPT_TEMPLATE.format(w1=w1, w2=w2)
 
     try:
         client = _get_openai_client()
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
+            temperature=temperature,
             timeout=10,
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        _CACHE[key] = content
+        return content
+    except (MissingAPIKeyError, OpenAIClientError):
+        raise
     except Exception as e:  # pragma: no cover - network errors
         raise OpenAIRequestError(str(e)) from e
 
@@ -103,6 +159,9 @@ def analyze_rhyme(word1: str, word2: str) -> tuple[str, str, str, str]:
         result = query_rhyme_score(word1, word2)
     except MissingAPIKeyError:
         msg = "OpenAI API key is missing. Set the OPENAI_API_KEY environment variable."
+        return "", "", msg, ""
+    except OpenAIClientError as e:
+        msg = f"Failed to initialize OpenAI client: {e}"
         return "", "", msg, ""
     except OpenAIRequestError as e:
         msg = f"Network error or timeout contacting OpenAI: {e}"
