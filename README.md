@@ -66,7 +66,24 @@ python app.py
 
 It will launch on [http://localhost:7860](http://localhost:7860)
 
-### 5. Run tests
+### 5. Use the CLI
+
+Analyze pairs directly from the command line:
+
+```bash
+python cli.py cat hat orange "door hinge"
+```
+
+Sample output:
+
+```
+Word 1 | Word 2      | Rhyme Type | Rarity
+-------+-------------+------------+-------
+cat    | hat         | Perfect    | 10
+orange | door hinge  | Forced     | 85
+```
+
+### 6. Run tests
 
 ```bash
 pytest
