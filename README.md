@@ -66,6 +66,12 @@ python app.py
 
 It will launch on [http://localhost:7860](http://localhost:7860)
 
+### 5. Run tests
+
+```bash
+pytest
+```
+
 ---
 
 ## 📦 Requirements
@@ -75,6 +81,7 @@ From `requirements.txt`:
 ```
 openai>=1.3.0
 gradio
+pytest
 ```
 
 ---
