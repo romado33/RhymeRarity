@@ -66,6 +66,21 @@ python app.py
 
 It will launch on [http://localhost:7860](http://localhost:7860)
 
+### 4a. Use the CLI
+
+```bash
+python cli.py cat hat fire choir
+```
+
+This prints a table:
+
+```
+Word 1          Word 2          Type        Rarity
+--------------  --------------  ----------  ------
+cat             hat             Perfect     10
+fire            choir           Slant       65
+```
+
 ### 5. Run tests
 
 ```bash
