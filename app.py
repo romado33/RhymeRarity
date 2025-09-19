@@ -510,14 +510,17 @@ class PhoneticEngine:
         
         while i < len(word):
             # Handle common patterns
-            if i < len(word) - 2:
+            if i <= len(word) - 4:
+                four_char = word[i:i+4]
+                if four_char == 'ough':
+                    phonemes.extend(['AH', 'F'])  # rough approximation
+                    i += 4
+                    continue
+
+            if i <= len(word) - 3:
                 three_char = word[i:i+3]
                 if three_char == 'tion':
                     phonemes.extend(['SH', 'AH', 'N'])
-                    i += 3
-                    continue
-                elif three_char == 'ough':
-                    phonemes.extend(['AH', 'F'])  # rough approximation
                     i += 3
                     continue
             
@@ -1256,7 +1259,37 @@ class AdvancedRapLyricAnalyzer:
         
         elif len(offsets) == 2:
             if set(offsets) == {1, 2}:
-                return "AAAB" or "ABAB"  # Depends on rhyme strength
+                offset_strength = {}
+                for offset in (1, 2):
+                    rhymes_at_offset = rhyme_by_offset.get(offset, [])
+                    total_confidence = sum(r.get('confidence', 0.0) for r in rhymes_at_offset)
+                    average_confidence = (
+                        total_confidence / len(rhymes_at_offset)
+                        if rhymes_at_offset
+                        else 0.0
+                    )
+                    offset_strength[offset] = (
+                        total_confidence,
+                        average_confidence,
+                        len(rhymes_at_offset)
+                    )
+
+                total1, avg1, count1 = offset_strength.get(1, (0.0, 0.0, 0))
+                total2, avg2, count2 = offset_strength.get(2, (0.0, 0.0, 0))
+
+                if total1 > total2:
+                    return "AAAB"
+                if total2 > total1:
+                    return "ABAB"
+                if avg1 > avg2:
+                    return "AAAB"
+                if avg2 > avg1:
+                    return "ABAB"
+                if count1 > count2:
+                    return "AAAB"
+                if count2 > count1:
+                    return "ABAB"
+                return "ABAB"
             elif set(offsets) == {1, 3}:
                 return "ABAB"  # Alternating
             else:
@@ -1545,8 +1578,17 @@ class UncommonRhymeGenerator:
         for rhyme in classified_rhymes:
             # Filter by cultural score if required
             if min_cultural_score > 0:
-                continue  # Would need cultural intelligence score
-            
+                cultural_score = getattr(rhyme, 'popularity', 0) or 0
+                if getattr(rhyme, 'cultural_context', None):
+                    cultural_score = max(cultural_score, 80)
+                if getattr(rhyme, 'source_type', None) == SourceType.MULTI_LINE_ANALYSIS:
+                    cultural_score = max(cultural_score, 90)
+                if len(getattr(rhyme, 'database_matches', ())) > 0:
+                    cultural_score = max(cultural_score, 85)
+
+                if cultural_score < min_cultural_score:
+                    continue
+
             rhyme_type = rhyme.rhyme_type
             
             # Categorize by type and special characteristics
@@ -1580,12 +1622,30 @@ class UncommonRhymeGenerator:
         algorithmic_rhymes.sort(key=lambda x: x.quality_score, reverse=True)
         
         # Limit results per category
-        category_limit = max_results // 5  # Distribute across categories
-        perfect_rhymes = perfect_rhymes[:category_limit]
-        near_rhymes = near_rhymes[:category_limit]
-        creative_rhymes = creative_rhymes[:category_limit]
-        cultural_rhymes = cultural_rhymes[:category_limit]
-        algorithmic_rhymes = algorithmic_rhymes[:category_limit]
+        categories = [
+            perfect_rhymes,
+            near_rhymes,
+            creative_rhymes,
+            cultural_rhymes,
+            algorithmic_rhymes,
+        ]
+        num_categories = len(categories)
+
+        if max_results <= 0:
+            limits = [0] * num_categories
+        else:
+            base_limit = max_results // num_categories
+            remainder = max_results % num_categories
+            limits = [
+                base_limit + (1 if idx < remainder else 0)
+                for idx in range(num_categories)
+            ]
+
+        perfect_rhymes = perfect_rhymes[:limits[0]]
+        near_rhymes = near_rhymes[:limits[1]]
+        creative_rhymes = creative_rhymes[:limits[2]]
+        cultural_rhymes = cultural_rhymes[:limits[3]]
+        algorithmic_rhymes = algorithmic_rhymes[:limits[4]]
         
         generation_time = time.time() - start_time
         
