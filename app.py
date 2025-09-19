@@ -2085,28 +2085,26 @@ class FixedSuperEnhancedPhoneticAnalyzer:
         
         return result
 
-    def get_stressed_vowel(self, word: str) -> str:
+    def get_stressed_vowel(self, word: str) -> Optional[str]:
         """
         Return the primary stressed vowel phoneme (e.g., 'AY1') for a given word,
         or None if no stressed vowel is found.
         """
-        phonemes = self.get_phonemes(word)
+        phonemes, _, _ = self.g2p_converter.get_word_phonemes(word)
         if not phonemes:
             return None
 
-        tokens = phonemes.split()
-
         # Look for the first vowel with primary stress (ends in '1')
-        for t in tokens:
-            base = ''.join(ch for ch in t if not ch.isdigit())
-            if base in self.VOWELS and t.endswith("1"):
-                return t  # return full phoneme like 'AY1'
+        for phoneme in phonemes:
+            base = ''.join(ch for ch in phoneme if not ch.isdigit())
+            if base in self.VOWELS and phoneme.endswith("1"):
+                return phoneme  # return full phoneme like 'AY1'
 
         # Fallback: return first vowel of any stress
-        for t in tokens:
-            base = ''.join(ch for ch in t if not ch.isdigit())
+        for phoneme in phonemes:
+            base = ''.join(ch for ch in phoneme if not ch.isdigit())
             if base in self.VOWELS:
-                return t
+                return phoneme
 
         return None
 
