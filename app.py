@@ -694,63 +694,61 @@ class RhymeClassifier:
         print("✓ Rhyme Classifier initialized with FIXED phonetic analysis")
         print("  🔧 Dollar/ART issue resolution integrated")
     
-def classify_rhyme(self, target_word: str, candidate_word: str) -> CompleteRhymeMatch:
-    """Comprehensive rhyme classification using FIXED phonetic analysis"""
+    def classify_rhyme(self, target_word: str, candidate_word: str) -> CompleteRhymeMatch:
+        """Comprehensive rhyme classification using FIXED phonetic analysis"""
 
-    # Use the FIXED phonetic analysis instead of PhoneticEngine
-    rating, confidence, notes = self.fixed_phonetic_analyzer.calculate_enhanced_rhyme_rating(
-        target_word, candidate_word
-    )
+        # Use the FIXED phonetic analysis instead of PhoneticEngine
+        rating, confidence, notes = self.fixed_phonetic_analyzer.calculate_enhanced_rhyme_rating(
+            target_word, candidate_word
+        )
 
-    # Create a phonetic match from the fixed analysis
-    phonetic_match = PhoneticMatch(
-        word1=target_word,
-        word2=candidate_word,
-        phonetic_similarity=confidence,
-        rhyme_core_match=(rating >= 90),      # High rating indicates core match
-        stress_pattern_match=(rating >= 70),  # Medium rating indicates stress match
-        ending_similarity=confidence,
-    )
+        # Create a phonetic match from the fixed analysis
+        phonetic_match = PhoneticMatch(
+            word1=target_word,
+            word2=candidate_word,
+            phonetic_similarity=confidence,
+            rhyme_core_match=(rating >= 90),      # High rating indicates core match
+            stress_pattern_match=(rating >= 70),  # Medium rating indicates stress match
+            ending_similarity=confidence,
+        )
 
-    # Determine rhyme type and base score using FIXED analysis
-    rhyme_type, base_score = self._determine_rhyme_type_fixed(
-        rating, confidence, target_word, candidate_word
-    )
+        # Determine rhyme type and base score using FIXED analysis
+        rhyme_type, base_score = self._determine_rhyme_type_fixed(
+            rating, confidence, target_word, candidate_word
+        )
 
-    # Use the rating from fixed analysis as starting point for final score
-    final_score = rating
+        # Use the rating from fixed analysis as starting point for final score
+        final_score = rating
 
-    # 🔧 Extra penalty for stressed vowel mismatch
-    sv1 = self.fixed_phonetic_analyzer.get_stressed_vowel(target_word)
-    sv2 = self.fixed_phonetic_analyzer.get_stressed_vowel(candidate_word)
-    if sv1 and sv2 and sv1 != sv2:
-        final_score *= 0.2  # harsh penalty if stressed vowels differ
+        # 🔧 Extra penalty for stressed vowel mismatch
+        sv1 = self.fixed_phonetic_analyzer.get_stressed_vowel(target_word)
+        sv2 = self.fixed_phonetic_analyzer.get_stressed_vowel(candidate_word)
+        if sv1 and sv2 and sv1 != sv2:
+            final_score *= 0.2  # harsh penalty if stressed vowels differ
 
-    # Determine strength category after adjustment
-    strength = self._score_to_strength(final_score)
+        # Determine strength category after adjustment
+        strength = self._score_to_strength(final_score)
 
-    # Get word metadata
-    syllable_count = self._count_syllables(candidate_word)
-    frequency_tier = self._get_frequency_tier(candidate_word)
+        # Get word metadata
+        syllable_count = self._count_syllables(candidate_word)
+        frequency_tier = self._get_frequency_tier(candidate_word)
 
-    # Generate explanation with fix information
-    explanation = self._generate_explanation_fixed(
-        rhyme_type, final_score, rating, confidence, notes
-    )
+        # Generate explanation with fix information
+        explanation = self._generate_explanation_fixed(
+            rhyme_type, final_score, rating, confidence, notes
+        )
 
-    return CompleteRhymeMatch(
-        word=candidate_word,
-        target_word=target_word,
-        rhyme_type=rhyme_type,
-        strength=strength,
-        score=final_score,
-        phonetic_match=phonetic_match,
-        syllable_count=syllable_count,
-        frequency_tier=frequency_tier,
-        explanation=explanation,
-        source_type=SourceType.RHYME_CLASSIFIER,
-    )
-
+        return CompleteRhymeMatch(
+            word=candidate_word,
+            target_word=target_word,
+            rhyme_type=rhyme_type,
+            strength=strength,
+            score=final_score,
+            phonetic_match=phonetic_match,
+            syllable_count=syllable_count,
+            frequency_tier=frequency_tier,
+            explanation=explanation,
+            source_type=SourceType.RHYME_CLASSIFIER,
         )
     
     def _determine_rhyme_type_fixed(self, rating: int, confidence: float, word1: str, word2: str) -> Tuple[RhymeType, int]:
@@ -1974,7 +1972,13 @@ class FixedSuperEnhancedPhoneticAnalyzer:
     def __init__(self):
         # Initialize fixed G2P converter
         self.g2p_converter = FixedResearchG2PConverter()
-        
+
+        # Core vowel set for stressed vowel detection
+        self.VOWELS = {
+            'AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'EH', 'ER', 'EY', 'IH',
+            'IY', 'OW', 'OY', 'UH', 'UW'
+        }
+
         # Research-backed acoustic similarity matrix
         self.acoustic_similarity_matrix = {
             ('AA', 'AO'): 0.88, ('AE', 'EH'): 0.85, ('AH', 'UH'): 0.82,
@@ -2081,30 +2085,35 @@ class FixedSuperEnhancedPhoneticAnalyzer:
         
         return result
 
-        def get_stressed_vowel(self, word: str) -> str:
-            """
-            Return the primary stressed vowel phoneme (e.g., 'AY1') for a given word,
-            or None if no stressed vowel is found.
-            """
-            phonemes = self.get_phonemes(word)
-            if not phonemes:
-                return None
-        
-            tokens = phonemes.split()
-        
-            # Look for the first vowel with primary stress (ends in '1')
-            for t in tokens:
-                base = ''.join(ch for ch in t if not ch.isdigit())
-                if base in self.VOWELS and t.endswith("1"):
-                    return t  # return full phoneme like 'AY1'
-        
-            # Fallback: return first vowel of any stress
-            for t in tokens:
-                base = ''.join(ch for ch in t if not ch.isdigit())
-                if base in self.VOWELS:
-                    return t
-        
+    def get_stressed_vowel(self, word: str) -> str:
+        """
+        Return the primary stressed vowel phoneme (e.g., 'AY1') for a given word,
+        or None if no stressed vowel is found.
+        """
+        phonemes = self.get_phonemes(word)
+        if not phonemes:
             return None
+
+        tokens = phonemes.split()
+
+        # Look for the first vowel with primary stress (ends in '1')
+        for t in tokens:
+            base = ''.join(ch for ch in t if not ch.isdigit())
+            if base in self.VOWELS and t.endswith("1"):
+                return t  # return full phoneme like 'AY1'
+
+        # Fallback: return first vowel of any stress
+        for t in tokens:
+            base = ''.join(ch for ch in t if not ch.isdigit())
+            if base in self.VOWELS:
+                return t
+
+        return None
+
+    def get_phonemes(self, word: str) -> str:
+        """Retrieve a space-delimited ARPAbet string for the given word."""
+        phoneme_list, _, _ = self.g2p_converter.get_word_phonemes(word)
+        return " ".join(phoneme_list)
 
     
     def _extract_rhyme_core_fixed(self, phonemes: List[str]) -> List[str]:
