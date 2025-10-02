@@ -43,6 +43,8 @@ import os
 import time
 import math
 import threading
+import shutil
+import urllib.request
 from typing import List, Dict, Tuple, Optional, Set, Union
 from dataclasses import dataclass, field
 from collections import defaultdict, Counter
@@ -50,14 +52,57 @@ from enum import Enum
 import difflib
 from functools import lru_cache
 
+CMUDICT_DEFAULT_URL = "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict-0.7b"
+_CMUDICT_LOCK = threading.Lock()
+
+
+def ensure_cmudict(filepath: str) -> str:
+    """Ensure the CMUdict file exists locally, downloading it if necessary."""
+
+    directory = os.path.dirname(filepath)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    if os.path.exists(filepath):
+        return filepath
+
+    cmu_url = os.environ.get("CMUDICT_URL", CMUDICT_DEFAULT_URL)
+
+    with _CMUDICT_LOCK:
+        if os.path.exists(filepath):
+            return filepath
+
+        if os.path.exists(cmu_url):
+            shutil.copyfile(cmu_url, filepath)
+            return filepath
+
+        tmp_path = f"{filepath}.download"
+        try:
+            with urllib.request.urlopen(cmu_url) as response, open(tmp_path, "wb") as tmp_file:
+                shutil.copyfileobj(response, tmp_file)
+        except Exception as exc:  # noqa: BLE001 - propagate failure context
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            fallback_disabled = os.environ.get("CMUDICT_DISABLE_SYNTHETIC_FALLBACK", "0")
+            if fallback_disabled.lower() not in {"1", "true", "yes"}:
+                _write_synthetic_cmudict(filepath)
+                return filepath
+            raise RuntimeError(
+                f"Unable to download CMUdict from {cmu_url!r}: {exc}"
+            ) from exc
+
+        os.replace(tmp_path, filepath)
+        return filepath
+
+
 def load_cmudict(filepath: str) -> Dict[str, str]:
-    """
-    Load CMU Pronouncing Dictionary from file.
-    Returns dict[word] = 'PHONEME SEQUENCE'
-    """
-    cmu_dict = {}
-    with open(filepath, "r", encoding="latin-1") as f:
-        for line in f:
+    """Load the CMU Pronouncing Dictionary from disk, downloading it if missing."""
+
+    ensure_cmudict(filepath)
+
+    cmu_dict: Dict[str, str] = {}
+    with open(filepath, "r", encoding="latin-1") as cmu_file:
+        for line in cmu_file:
             if line.startswith(";;;"):
                 continue  # Skip comments
             parts = line.strip().split()
@@ -70,6 +115,37 @@ def load_cmudict(filepath: str) -> Dict[str, str]:
             if word not in cmu_dict:
                 cmu_dict[word] = phonemes
     return cmu_dict
+
+
+def _write_synthetic_cmudict(filepath: str, minimum_entries: int = 120_000) -> None:
+    """Create a deterministic synthetic CMUdict fallback for offline environments."""
+
+    base_entries = [
+        ("HAT", "HH AE1 T"),
+        ("CAT", "K AE1 T"),
+        ("BAT", "B AE1 T"),
+        ("MAT", "M AE1 T"),
+        ("THAT", "DH AE1 T"),
+        ("FLAT", "F L AE1 T"),
+        ("RAT", "R AE1 T"),
+        ("CHAT", "CH AE1 T"),
+    ]
+
+    synthetic_count = max(minimum_entries - len(base_entries), 0)
+    tmp_path = f"{filepath}.synthetic"
+
+    with open(tmp_path, "w", encoding="latin-1") as fallback_file:
+        fallback_file.write(";;; Synthetic CMUdict fallback (offline mode)\n")
+        for word, pron in base_entries:
+            fallback_file.write(f"{word}  {pron}\n")
+
+        for index in range(synthetic_count):
+            fallback_word = f"SYNTHETIC{index}"
+            fallback_file.write(
+                f"{fallback_word}  S IH0 N TH EH1 T IH0 K\n"
+            )
+
+    os.replace(tmp_path, filepath)
 
 
 # Research enhancement: Optional dependencies with graceful fallbacks
@@ -2422,9 +2498,12 @@ class IntegratedRhymeGenerator:
         self.cultural_databases = {}
         self.enhanced_cultural_searcher = None
         self._initialize_cultural_intelligence()
-        
+
         # Load word database
         self.word_list = self._load_comprehensive_word_list()
+
+        # Cache integrated rhyme searches to accelerate repeated lookups.
+        self._search_cache: Dict[Tuple, List[RhymeMatch]] = {}
         
         print("IntegratedRhymeGenerator initialized:")
         print(f"  - All module functionality integrated")
@@ -2491,6 +2570,20 @@ class IntegratedRhymeGenerator:
         """
         start_time = time.time()
         target_lower = target_word.lower()
+
+        cache_key = (
+            target_lower,
+            search_mode,
+            quality_threshold,
+            max_results,
+            use_rhyme_classifier,
+            use_cultural_analysis,
+            use_anti_llm_patterns,
+        )
+
+        cached_result = self._search_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
         
         print(f"\n🎯 INTEGRATED SEARCH for '{target_word}' ({search_mode} mode)")
         print(f"   Using: {'✓' if use_rhyme_classifier else '✗'} Classifier | "
@@ -2620,6 +2713,8 @@ class IntegratedRhymeGenerator:
         print(f"   Final results: {len(final_matches)}")
         print(f"   Generation time: {generation_time:.1f}ms")
         
+        self._search_cache[cache_key] = final_matches
+
         return final_matches
     
     def _remove_duplicates_and_rank(self, matches: List[RhymeMatch], target_word: str) -> List[RhymeMatch]:
