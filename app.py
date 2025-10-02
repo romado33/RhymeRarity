@@ -278,6 +278,7 @@ class ComprehensiveRhymeResult:
     creative_rhymes: List[RhymeMatch]  # Multi-word, rare patterns
     cultural_rhymes: List[RhymeMatch]  # High cultural intelligence
     algorithmic_rhymes: List[RhymeMatch]  # Anti-LLM generated
+    classified_rhymes: List[RhymeMatch]
     statistics: Dict[str, any]
     generation_time: float
 
@@ -1593,6 +1594,7 @@ class UncommonRhymeGenerator:
             creative_rhymes=creative_rhymes,
             cultural_rhymes=cultural_rhymes,
             algorithmic_rhymes=algorithmic_rhymes,
+            classified_rhymes=classified_rhymes,
             statistics=statistics,
             generation_time=generation_time
         )
@@ -1827,13 +1829,22 @@ class FixedResearchG2PConverter:
             'philia': ['F', 'IH1', 'L', 'IY0', 'AH0'],       # bibliophilia
             'phobia': ['F', 'OW1', 'B', 'IY0', 'AH0'],       # claustrophobia
         }
-    
+
+        # Memoization cache for phoneme lookups
+        self._cache_lock = threading.Lock()
+        self._phoneme_cache: Dict[str, Tuple[List[str], float, float]] = {}
+
     def get_word_phonemes(self, word: str) -> Tuple[List[str], float, float]:
         """
         FIXED phoneme extraction with correct ARPAbet representation
         Returns: (phonemes, confidence, accuracy)
         """
         word_lower = word.lower().strip()
+
+        with self._cache_lock:
+            cached = self._phoneme_cache.get(word_lower)
+        if cached is not None:
+            return cached
         
         # Priority 1: External phonemizer (most accurate)
         if PHONEMIZER_AVAILABLE:
@@ -1841,7 +1852,7 @@ class FixedResearchG2PConverter:
                 phoneme_str = phonemize(word_lower, language='en-us', backend='espeak')
                 phonemes = self._parse_espeak_to_arpabet(phoneme_str)
                 if phonemes and len(phonemes) > 0:
-                    return phonemes, 0.95, 0.9
+                    return self._store_phoneme_result(word_lower, phonemes, 0.95, 0.9)
             except:
                 pass
         
@@ -1851,7 +1862,7 @@ class FixedResearchG2PConverter:
                 prefix = word_lower[:-len(pattern)]
                 prefix_phonemes = self._convert_to_phonemes_fixed(prefix)
                 full_phonemes = prefix_phonemes + phonemes
-                return full_phonemes, 0.88, 0.85
+                return self._store_phoneme_result(word_lower, full_phonemes, 0.88, 0.85)
         
         # Priority 3: Word ending patterns (CRITICAL FIX)
         for pattern, phonemes in self.word_ending_patterns.items():
@@ -1859,11 +1870,18 @@ class FixedResearchG2PConverter:
                 prefix = word_lower[:-len(pattern)]
                 prefix_phonemes = self._convert_to_phonemes_fixed(prefix)
                 full_phonemes = prefix_phonemes + phonemes
-                return full_phonemes, 0.82, 0.78
-        
+                return self._store_phoneme_result(word_lower, full_phonemes, 0.82, 0.78)
+
         # Priority 4: Letter-by-letter conversion
         phonemes = self._convert_to_phonemes_fixed(word_lower)
-        return phonemes, 0.70, 0.68
+        return self._store_phoneme_result(word_lower, phonemes, 0.70, 0.68)
+
+    def _store_phoneme_result(self, key: str, phonemes: List[str], confidence: float, accuracy: float) -> Tuple[List[str], float, float]:
+        """Cache helper to store and return phoneme lookups"""
+        result = (phonemes, confidence, accuracy)
+        with self._cache_lock:
+            self._phoneme_cache[key] = result
+        return result
     
     def _convert_to_phonemes_fixed(self, text: str) -> List[str]:
         """FIXED phoneme conversion with proper orthography handling"""
@@ -2480,54 +2498,47 @@ class IntegratedRhymeGenerator:
               f"{'✓' if use_anti_llm_patterns else '✗'} Anti-LLM")
         
         all_matches = []
-        
-        # 1. RHYME CLASSIFIER INTEGRATION
-        if use_rhyme_classifier:
-            classifier_matches = []
-            for candidate in self.word_list[:200]:  # Limit for performance
-                if candidate.lower() != target_lower:
-                    complete_match = self.rhyme_classifier.classify_rhyme(target_word, candidate)
-                    
-                    if complete_match.score >= quality_threshold:
-                        # Convert to RhymeMatch
-                        match = RhymeMatch(
-                            word=complete_match.word,
-                            rhyme_rating=complete_match.score,
-                            meter=f"[{complete_match.syllable_count}syl]",
-                            popularity=60,  # Default
-                            categories=tuple(['Classified', complete_match.rhyme_type.value, complete_match.strength.value]),
-                            source_type=SourceType.RHYME_CLASSIFIER,
-                            phonetic_confidence=complete_match.phonetic_match.phonetic_similarity,
-                            frequency_tier=FrequencyTier.COMMON if complete_match.frequency_tier == 'common' else FrequencyTier.RARE,
-                            research_notes=complete_match.explanation,
-                            syllable_count=complete_match.syllable_count,
-                            rhyme_type=complete_match.rhyme_type,
-                            rhyme_strength=complete_match.strength
-                        )
-                        classifier_matches.append(match)
-            
-            all_matches.extend(classifier_matches)
-            print(f"   Rhyme Classifier: {len(classifier_matches)} matches")
-        
-        # 2. COMPREHENSIVE GENERATOR INTEGRATION  
-        if use_anti_llm_patterns:
+
+        generator_result: Optional[ComprehensiveRhymeResult] = None
+        if use_rhyme_classifier or use_anti_llm_patterns:
+            generator_limit = max(40, max_results * 2)
             generator_result = self.uncommon_generator.generate_comprehensive_rhymes(
-                target_word, 
-                max_results=max_results//2,
-                include_rare=True,
-                include_multiword=True,
-                include_algorithmic=True
+                target_word,
+                max_results=generator_limit,
+                include_rare=use_anti_llm_patterns,
+                include_multiword=use_anti_llm_patterns,
+                include_algorithmic=use_anti_llm_patterns
             )
-            
-            # Combine all categories from comprehensive generator
-            generator_matches = (
-                generator_result.perfect_rhymes +
-                generator_result.near_rhymes +
+
+        # 1. RHYME CLASSIFIER INTEGRATION
+        if use_rhyme_classifier and generator_result:
+            classifier_matches = [
+                match for match in generator_result.classified_rhymes
+                if match.rhyme_rating >= quality_threshold
+            ]
+
+            classifier_matches.sort(key=lambda m: m.quality_score, reverse=True)
+            classifier_matches = classifier_matches[:max_results]
+
+            all_matches.extend(classifier_matches)
+            print(
+                f"   Rhyme Classifier: {len(classifier_matches)} matches "
+                f"(from {len(generator_result.classified_rhymes)} candidates)"
+            )
+
+        # 2. COMPREHENSIVE GENERATOR INTEGRATION
+        if use_anti_llm_patterns and generator_result:
+            creative_pool = (
                 generator_result.creative_rhymes +
                 generator_result.cultural_rhymes +
                 generator_result.algorithmic_rhymes
             )
-            
+
+            generator_matches = [
+                match for match in creative_pool
+                if match.rhyme_rating >= quality_threshold
+            ]
+
             all_matches.extend(generator_matches)
             print(f"   Comprehensive Generator: {len(generator_matches)} matches")
         
