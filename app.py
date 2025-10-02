@@ -1390,49 +1390,53 @@ class UncommonRhymeGenerator:
     
     def _build_comprehensive_database(self) -> Set[str]:
         """Build comprehensive word database"""
-        
-        # Core English vocabulary
-        base_words = {
-            # Common words
+
+        lexicon: Set[str] = set()
+
+        # Prefer the CMU dictionary already loaded by the phonetic engine.
+        cmu_entries = getattr(self.phonetic_engine, "cmudict", {}) or {}
+        if cmu_entries:
+            lexicon.update(cmu_entries.keys())
+        else:
+            # Fall back to loading directly from disk if the phonetic engine
+            # could not populate its CMU dictionary (for example, in limited
+            # environments or during tests).
+            cmu_path = os.path.join(os.path.dirname(__file__), "data", "cmudict-0.7b")
+            try:
+                lexicon.update(load_cmudict(cmu_path).keys())
+            except (FileNotFoundError, OSError):
+                pass
+
+        # Retain curated fallback vocabulary so specialized multi-word and
+        # rare-pattern seeds remain available even if the external lexicon is
+        # unavailable.
+        fallback_words = {
             'cat', 'hat', 'bat', 'rat', 'mat', 'fat', 'sat', 'pat', 'flat', 'chat',
             'run', 'fun', 'sun', 'gun', 'done', 'one', 'none', 'son', 'ton', 'won',
-            'dog', 'log', 'fog', 'hog', 'bog', 'cog', 'jog', 'frog', 'smog', 
+            'dog', 'log', 'fog', 'hog', 'bog', 'cog', 'jog', 'frog', 'smog',
             'chair', 'care', 'bear', 'stare', 'share', 'fair', 'hair', 'pair', 'rare', 'dare',
-            
-            # Binder family
             'binder', 'finder', 'grinder', 'reminder', 'kinder', 'tinder', 'cinder',
             'minder', 'winder', 'hinder', 'behind her', 'find her', 'remind her',
             'mind her', 'kind her', 'signed her', 'designed her', 'refined her',
-            
-            # Advanced/Sophisticated words (Anti-LLM targets)
             'entrepreneur', 'connoisseur', 'saboteur', 'amateur', 'voyeur', 'raconteur',
             'sophisticated', 'complicated', 'dedicated', 'educated', 'coordinated',
             'appreciated', 'anticipated', 'demonstrated', 'concentrated', 'fascinated',
-            
-            # -esque pattern (rare pattern detection)
             'picturesque', 'grotesque', 'arabesque', 'burlesque', 'statuesque',
             'romanesque', 'gigantesque', 'barbaresque',
-            
-            # -ique patterns
             'unique', 'antique', 'boutique', 'technique', 'critique', 'mystique',
             'physique', 'oblique', 'clique', 'pique',
-            
-            # -ology/-ography patterns
             'technology', 'psychology', 'biology', 'geology', 'ecology',
             'photography', 'geography', 'biography', 'calligraphy',
-            
-            # Orange challenge words
             'orange', 'door hinge', 'sporange', 'four inch', 'more fringe',
             'lozenge', 'challenge', 'arrange', 'strange', 'change',
-            
-            # Multi-word phrases
             'find there', 'behind there', 'remind there', 'mind there',
             'signed there', 'designed there', 'refined there', 'defined there',
             'find where', 'behind where', 'remind where', 'mind where',
             'find care', 'behind care', 'remind care', 'mind care'
         }
-        
-        return base_words
+        lexicon.update(fallback_words)
+
+        return lexicon
     
     def _initialize_rare_patterns(self) -> Dict[str, List[str]]:
         """Initialize rare pattern algorithms for anti-LLM generation"""
@@ -2432,18 +2436,29 @@ class IntegratedRhymeGenerator:
     
     def _load_comprehensive_word_list(self) -> List[str]:
         """Load comprehensive word list combining all sources"""
-        # Use uncommon generator's word database as base
-        base_words = list(self.uncommon_generator.word_database)
-        
-        # Add common words for completeness
-        common_additions = [
-            'love', 'above', 'move', 'prove', 'grove', 'dove', 'shove',
-            'time', 'rhyme', 'crime', 'prime', 'lime', 'climb', 'chime',
-            'heart', 'part', 'art', 'start', 'smart', 'chart', 'dart',
-            'mind', 'find', 'kind', 'blind', 'wind', 'bind', 'grind'
-        ]
-        
-        return sorted(set(base_words + common_additions))
+
+        # Use uncommon generator's expanded database as the authoritative list.
+        words = sorted(set(self.uncommon_generator.word_database))
+
+        # Optionally enrich with frequency metadata if available on disk.
+        frequency_map: Dict[str, float] = {}
+        frequency_path = os.path.join(os.path.dirname(__file__), "data", "word_frequency.json")
+        if os.path.exists(frequency_path):
+            try:
+                with open(frequency_path, "r", encoding="utf-8") as freq_file:
+                    raw_frequencies = json.load(freq_file)
+                for word in words:
+                    freq_key = word.lower()
+                    if isinstance(raw_frequencies, dict) and freq_key in raw_frequencies:
+                        frequency_map[word] = float(raw_frequencies[freq_key])
+            except (ValueError, OSError):
+                frequency_map = {}
+
+        # Store frequencies for downstream consumers; defaults to empty when
+        # metadata is unavailable.
+        self.word_frequencies = frequency_map
+
+        return words
     
     def find_fully_integrated_rhymes(self, 
                                    target_word: str,
