@@ -330,13 +330,14 @@ class PhoneticEngine:
         }
 
         # Load CMUdict
-        cmu_path = os.path.join(os.path.dirname(__file__), "cmudict-0.7b")
-        if os.path.exists(cmu_path):
+        cmu_path = os.path.join(os.path.dirname(__file__), "data", "cmudict-0.7b")
+        try:
             self.cmudict = load_cmudict(cmu_path)
-            print(f"✓ Loaded CMUdict with {len(self.cmudict):,} entries")
-        else:
+        except (FileNotFoundError, OSError):
             self.cmudict = {}
             print("⚠️ CMUdict file not found, using fallback dictionary")
+        else:
+            print(f"✓ Loaded CMUdict with {len(self.cmudict):,} entries")
 
         # Keep the fallback phoneme dictionary for testing
         self.phoneme_dict = self._build_phoneme_dictionary()
