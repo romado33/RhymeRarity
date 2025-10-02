@@ -40,6 +40,14 @@ cd rhyme-rarity-checker
 pip install -r requirements.txt
 ```
 
+`phonemizer` relies on the [espeak](http://espeak.sourceforge.net/) backend. Install it via your system package manager, e.g.
+
+```bash
+sudo apt-get install espeak
+# or on macOS
+brew install espeak
+```
+
 ### 3. Add your OpenAI API key
 Create a `.env` file:
 ```env
@@ -91,6 +99,8 @@ From `requirements.txt`:
 openai>=1.3.0
 gradio
 pytest
+phonemizer
+python-Levenshtein
 ```
 
 ---

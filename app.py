@@ -427,7 +427,23 @@ class PhoneticEngine:
 
     def get_phonemes(self, word: str) -> str:
         """Get phoneme representation for a word"""
-        word_clean = re.sub(r'[^a-zA-Z]', '', word.lower())
+        tokens = [token for token in re.findall(r"[a-zA-Z]+", word.lower()) if token]
+
+        if not tokens:
+            return ""
+
+        if len(tokens) == 1:
+            return self._get_single_word_phonemes(tokens[0])
+
+        phoneme_sequences = [self._get_single_word_phonemes(token) for token in tokens]
+        return " ".join(sequence for sequence in phoneme_sequences if sequence)
+
+    def _get_single_word_phonemes(self, word_clean: str) -> str:
+        """Resolve phonemes for a single, sanitized token."""
+        if not word_clean:
+            return ""
+
+        word_clean = word_clean.lower()
 
         # First check CMUdict
         if word_clean in self.cmudict:
@@ -438,10 +454,18 @@ class PhoneticEngine:
             return self.phoneme_dict[word_clean]
 
         # Try phonemizer if available
-        if PHONEMIZER_AVAILABLE:
+        if self.PHONEMIZER_AVAILABLE:
             try:
-                phonemes = phonemize(word_clean, language="en-us", backend="espeak")
-                return self._convert_ipa_to_arpabet(phonemes)
+                phonemes = phonemize(
+                    word_clean,
+                    language="en-us",
+                    backend="espeak",
+                    strip=True,
+                    njobs=1,
+                )
+                converted = self._convert_ipa_to_arpabet(phonemes)
+                if converted:
+                    return converted
             except Exception:
                 pass
 
