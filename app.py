@@ -45,12 +45,90 @@ import math
 import threading
 import shutil
 import urllib.request
+import logging
+from contextlib import contextmanager, nullcontext
 from typing import List, Dict, Tuple, Optional, Set, Union
 from dataclasses import dataclass, field
 from collections import defaultdict, Counter
 from enum import Enum
 import difflib
 from functools import lru_cache
+
+
+LOGGER_NAME = "rhyme_engine"
+logger = logging.getLogger(LOGGER_NAME)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+    )
+    _handler.setFormatter(_formatter)
+    logger.addHandler(_handler)
+
+_log_level = os.environ.get("RHYME_ENGINE_LOG_LEVEL", "INFO")
+try:
+    logger.setLevel(_log_level.upper())
+except (ValueError, AttributeError):
+    logger.setLevel(logging.INFO)
+
+
+class QueryTraceLogger:
+    """Structured logging helper scoped to a specific query."""
+
+    def __init__(self, base_logger: logging.Logger, query_word: str, query_id: str, scope: Tuple[str, ...] = ()):
+        self._logger = base_logger
+        self._query_word = query_word
+        self._query_id = query_id
+        self._scope = scope
+
+    # ------------------------------------------------------------------
+    # Core logging helpers
+    # ------------------------------------------------------------------
+    def child(self, scope_name: str) -> "QueryTraceLogger":
+        return QueryTraceLogger(self._logger, self._query_word, self._query_id, self._scope + (scope_name,))
+
+    def _format_prefix(self) -> str:
+        scope = " > ".join(self._scope) if self._scope else "root"
+        return f"[{self._query_word}|{self._query_id}] {scope}: "
+
+    def _format_metadata(self, metadata: Dict[str, Union[str, int, float]]) -> str:
+        if not metadata:
+            return ""
+        formatted = ", ".join(f"{key}={value}" for key, value in sorted(metadata.items()))
+        return f" | {formatted}"
+
+    def log(self, level: int, message: str, **metadata: Union[str, int, float]) -> None:
+        self._logger.log(level, self._format_prefix() + message + self._format_metadata(metadata))
+
+    def info(self, message: str, **metadata: Union[str, int, float]) -> None:
+        self.log(logging.INFO, message, **metadata)
+
+    def warning(self, message: str, **metadata: Union[str, int, float]) -> None:
+        self.log(logging.WARNING, message, **metadata)
+
+    def error(self, message: str, **metadata: Union[str, int, float]) -> None:
+        self.log(logging.ERROR, message, **metadata)
+
+    def exception(self, message: str, **metadata: Union[str, int, float]) -> None:
+        self._logger.exception(self._format_prefix() + message + self._format_metadata(metadata))
+
+    @contextmanager
+    def time_block(self, block_name: str, **metadata: Union[str, int, float]):
+        block_logger = self.child(block_name)
+        block_logger.info("start", **metadata)
+        start = time.perf_counter()
+        try:
+            yield block_logger
+        except Exception as exc:  # noqa: BLE001 - propagate context
+            duration_ms = (time.perf_counter() - start) * 1000
+            block_logger.exception(
+                f"failed after {duration_ms:.2f}ms: {exc}",
+                **metadata,
+            )
+            raise
+        else:
+            duration_ms = (time.perf_counter() - start) * 1000
+            block_logger.info(f"completed in {duration_ms:.2f}ms", **metadata)
 
 CMUDICT_DEFAULT_URL = "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict-0.7b"
 _CMUDICT_LOCK = threading.Lock()
@@ -74,6 +152,7 @@ def ensure_cmudict(filepath: str) -> str:
 
         if os.path.exists(cmu_url):
             shutil.copyfile(cmu_url, filepath)
+            logger.info("Loaded CMUdict from local path %s", cmu_url)
             return filepath
 
         tmp_path = f"{filepath}.download"
@@ -86,12 +165,18 @@ def ensure_cmudict(filepath: str) -> str:
             fallback_disabled = os.environ.get("CMUDICT_DISABLE_SYNTHETIC_FALLBACK", "0")
             if fallback_disabled.lower() not in {"1", "true", "yes"}:
                 _write_synthetic_cmudict(filepath)
+                logger.warning(
+                    "Falling back to synthetic CMUdict after download failure (source: %s)",
+                    cmu_url,
+                )
                 return filepath
+            logger.error("Unable to download CMUdict from %s: %s", cmu_url, exc)
             raise RuntimeError(
                 f"Unable to download CMUdict from {cmu_url!r}: {exc}"
             ) from exc
 
         os.replace(tmp_path, filepath)
+        logger.info("Downloaded CMUdict successfully from %s", cmu_url)
         return filepath
 
 
@@ -154,6 +239,7 @@ try:
     PHONEMIZER_AVAILABLE = True
 except ImportError:
     PHONEMIZER_AVAILABLE = False
+    logger.warning("Phonemizer dependency unavailable; using fallback approximations")
 
 try:
     from Levenshtein import distance as levenshtein_distance
@@ -162,6 +248,7 @@ except ImportError:
     def levenshtein_distance(a, b):
         return int(100 * (1 - difflib.SequenceMatcher(None, a, b).ratio()))
     FUZZY_MATCHING_AVAILABLE = False
+    logger.warning("python-Levenshtein not installed; using difflib fallback")
 
 # =============================================================================
 # CORE DATA STRUCTURES AND ENUMS (ENHANCED FROM MODULES)
@@ -413,8 +500,10 @@ class PhoneticEngine:
         except (FileNotFoundError, OSError):
             self.cmudict = {}
             print("⚠️ CMUdict file not found, using fallback dictionary")
+            logger.warning("CMUdict file not found at %s; using fallback dictionary", cmu_path)
         else:
             print(f"✓ Loaded CMUdict with {len(self.cmudict):,} entries")
+            logger.info("PhoneticEngine loaded CMUdict with %d entries", len(self.cmudict))
 
         # Keep the fallback phoneme dictionary for testing
         self.phoneme_dict = self._build_phoneme_dictionary()
@@ -422,8 +511,10 @@ class PhoneticEngine:
         self.PHONEMIZER_AVAILABLE = PHONEMIZER_AVAILABLE
         if PHONEMIZER_AVAILABLE:
             print("✓ Advanced phonemizer available")
+            logger.info("Phonemizer available; using advanced backend")
         else:
             print("✓ Using enhanced approximation algorithms")
+            logger.warning("Phonemizer unavailable; relying on approximation algorithms")
 
     def get_phonemes(self, word: str) -> str:
         """Get phoneme representation for a word"""
@@ -451,6 +542,7 @@ class PhoneticEngine:
 
         # Then check fallback hardcoded dict
         if word_clean in self.phoneme_dict:
+            logger.info("Using fallback phoneme dictionary for '%s'", word_clean)
             return self.phoneme_dict[word_clean]
 
         # Try phonemizer if available
@@ -466,10 +558,16 @@ class PhoneticEngine:
                 converted = self._convert_ipa_to_arpabet(phonemes)
                 if converted:
                     return converted
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - runtime logging
+                logger.exception("Phonemizer failed for '%s'; using approximation fallback", word_clean)
+        else:
+            logger.warning(
+                "Phonemizer unavailable for '%s'; using approximation fallback",
+                word_clean,
+            )
 
         # Last fallback: algorithmic approximation
+        logger.warning("Approximating phonemes algorithmically for '%s'", word_clean)
         return self._approximate_phonemes(word_clean)
 
     
@@ -1437,9 +1535,9 @@ class EnhancedCulturalDatabaseSearcher:
                                     }
                                     all_results.append(enhanced_result)
             
-            except sqlite3.Error as e:
-                print(f"Error searching {db_file}: {e}")
-        
+            except sqlite3.Error:
+                logger.exception("Error searching %s during cultural analysis", db_file)
+
         # Sort by confidence and remove low-quality matches
         all_results = [r for r in all_results if r['confidence'] > 0.4]
         all_results.sort(key=lambda x: x['confidence'], reverse=True)
@@ -1578,19 +1676,20 @@ class UncommonRhymeGenerator:
             'compound_generation': lambda word: self._generate_compound_rhymes(word)
         }
     
-    def generate_comprehensive_rhymes(self, 
+    def generate_comprehensive_rhymes(self,
                                     target_word: str,
                                     max_results: int = 40,
                                     include_rare: bool = True,
                                     include_multiword: bool = True,
                                     include_algorithmic: bool = True,
-                                    min_cultural_score: int = 0) -> ComprehensiveRhymeResult:
+                                    min_cultural_score: int = 0,
+                                    trace_logger: Optional[QueryTraceLogger] = None) -> ComprehensiveRhymeResult:
         """
         Generate comprehensive rhymes using all 4 layers
         """
-        import time
-        start_time = time.time()
-        
+        start_time = time.perf_counter()
+        trace = trace_logger
+
         statistics = {
             'total_analyzed': 0,
             'perfect_found': 0,
@@ -1603,36 +1702,52 @@ class UncommonRhymeGenerator:
         }
         
         # Step 1: Generate candidate words
-        candidates = self._generate_candidates(target_word, include_rare, include_multiword, include_algorithmic)
+        if trace:
+            with trace.time_block(
+                "candidate_generation",
+                include_rare=int(include_rare),
+                include_multiword=int(include_multiword),
+                include_algorithmic=int(include_algorithmic),
+            ) as candidate_trace:
+                candidates = self._generate_candidates(
+                    target_word, include_rare, include_multiword, include_algorithmic
+                )
+                candidate_trace.info("generated candidates", count=len(candidates))
+        else:
+            candidates = self._generate_candidates(target_word, include_rare, include_multiword, include_algorithmic)
         statistics['total_analyzed'] = len(candidates)
-        
+
         # Step 2: Classify all candidates using integrated rhyme classifier
         classified_rhymes = []
-        for candidate in candidates:
-            complete_match = self.rhyme_classifier.classify_rhyme(target_word, candidate)
-            
-            # Convert to RhymeMatch for compatibility
-            rhyme_match = RhymeMatch(
-                word=complete_match.word,
-                rhyme_rating=complete_match.score,
-                meter=complete_match.meter,
-                popularity=complete_match.popularity,
-                categories=complete_match.categories,
-                cultural_context=complete_match.cultural_context,
-                source_type=complete_match.source_type,
-                phonetic_confidence=complete_match.phonetic_confidence,
-                frequency_tier=FrequencyTier.COMMON if complete_match.frequency_tier == 'common' else FrequencyTier.RARE,
-                database_matches=complete_match.database_matches,
-                research_notes=complete_match.research_notes,
-                stress_pattern=complete_match.stress_pattern,
-                syllable_count=complete_match.syllable_count,
-                metrical_feet=complete_match.metrical_feet,
-                rhythmic_compatibility=complete_match.rhythmic_compatibility,
-                rhyme_type=complete_match.rhyme_type,
-                rhyme_strength=complete_match.strength
-            )
-            classified_rhymes.append(rhyme_match)
-        
+        classification_cm = trace.time_block("classification", candidate_count=len(candidates)) if trace else nullcontext()
+        with classification_cm as classification_trace:
+            for candidate in candidates:
+                complete_match = self.rhyme_classifier.classify_rhyme(target_word, candidate)
+
+                # Convert to RhymeMatch for compatibility
+                rhyme_match = RhymeMatch(
+                    word=complete_match.word,
+                    rhyme_rating=complete_match.score,
+                    meter=complete_match.meter,
+                    popularity=complete_match.popularity,
+                    categories=complete_match.categories,
+                    cultural_context=complete_match.cultural_context,
+                    source_type=complete_match.source_type,
+                    phonetic_confidence=complete_match.phonetic_confidence,
+                    frequency_tier=FrequencyTier.COMMON if complete_match.frequency_tier == 'common' else FrequencyTier.RARE,
+                    database_matches=complete_match.database_matches,
+                    research_notes=complete_match.research_notes,
+                    stress_pattern=complete_match.stress_pattern,
+                    syllable_count=complete_match.syllable_count,
+                    metrical_feet=complete_match.metrical_feet,
+                    rhythmic_compatibility=complete_match.rhythmic_compatibility,
+                    rhyme_type=complete_match.rhyme_type,
+                    rhyme_strength=complete_match.strength
+                )
+                classified_rhymes.append(rhyme_match)
+            if classification_trace:
+                classification_trace.info("classified candidates", total=len(classified_rhymes))
+
         # Step 3: Categorize results
         perfect_rhymes = []
         near_rhymes = []
@@ -1669,7 +1784,17 @@ class UncommonRhymeGenerator:
             if self._is_algorithmic_generation(rhyme.word, target_word):
                 algorithmic_rhymes.append(rhyme)
                 statistics['algorithmic_found'] += 1
-        
+
+        if trace:
+            trace.info(
+                "categorized rhymes",
+                perfect=len(perfect_rhymes),
+                near=len(near_rhymes),
+                creative=len(creative_rhymes),
+                cultural=len(cultural_rhymes),
+                algorithmic=len(algorithmic_rhymes),
+            )
+
         # Step 4: Sort and limit each category
         perfect_rhymes.sort(key=lambda x: x.quality_score, reverse=True)
         near_rhymes.sort(key=lambda x: x.quality_score, reverse=True)
@@ -1684,9 +1809,16 @@ class UncommonRhymeGenerator:
         creative_rhymes = creative_rhymes[:category_limit]
         cultural_rhymes = cultural_rhymes[:category_limit]
         algorithmic_rhymes = algorithmic_rhymes[:category_limit]
-        
-        generation_time = time.time() - start_time
-        
+
+        generation_time = time.perf_counter() - start_time
+
+        if trace:
+            trace.info(
+                "generation summary",
+                total_classified=len(classified_rhymes),
+                elapsed_ms=f"{generation_time * 1000:.2f}",
+            )
+
         return ComprehensiveRhymeResult(
             target_word=target_word,
             perfect_rhymes=perfect_rhymes,
@@ -1769,9 +1901,12 @@ class UncommonRhymeGenerator:
                         candidates.update(transformed)
                     else:
                         candidates.add(transformed)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - log and continue
+                logger.exception(
+                    "Transformation rule '%s' failed for '%s'", rule_name, target_word
+                )
                 continue  # Skip failed transformations
-        
+
         return candidates
     
     def _generate_phonetic_variants(self, word: str) -> List[str]:
@@ -2547,13 +2682,20 @@ class IntegratedRhymeGenerator:
                 try:
                     conn = sqlite3.connect(db_file, check_same_thread=False)
                     self.cultural_databases[db_file] = conn
-                except:
-                    pass
-        
+                    logger.info("Connected to cultural database %s", db_file)
+                except Exception:
+                    logger.exception("Failed to connect to cultural database %s", db_file)
+
         if self.cultural_databases:
             self.enhanced_cultural_searcher = EnhancedCulturalDatabaseSearcher(
                 self.cultural_databases, self.phonetic_analyzer
             )
+            logger.info(
+                "Cultural intelligence enabled with %d databases",
+                len(self.cultural_databases),
+            )
+        else:
+            logger.warning("No cultural databases available; cultural analysis disabled")
     
     def _load_comprehensive_word_list(self) -> List[str]:
         """Load comprehensive word list combining all sources"""
@@ -2581,18 +2723,20 @@ class IntegratedRhymeGenerator:
 
         return words
     
-    def find_fully_integrated_rhymes(self, 
+    def find_fully_integrated_rhymes(self,
                                    target_word: str,
                                    search_mode: str = "comprehensive",
                                    quality_threshold: int = 60,
                                    max_results: int = 40,
                                    use_rhyme_classifier: bool = True,
                                    use_cultural_analysis: bool = True,
-                                   use_anti_llm_patterns: bool = True) -> List[RhymeMatch]:
+                                   use_anti_llm_patterns: bool = True,
+                                   trace_logger: Optional[QueryTraceLogger] = None) -> List[RhymeMatch]:
         """
         Fully integrated rhyme search using all module functionality
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
+        trace = trace_logger
         target_lower = target_word.lower()
 
         cache_key = (
@@ -2607,41 +2751,80 @@ class IntegratedRhymeGenerator:
 
         cached_result = self._search_cache.get(cache_key)
         if cached_result is not None:
+            if trace:
+                trace.info("cache hit", results=len(cached_result))
             return cached_result
+        if trace:
+            trace.info("cache miss")
         
         print(f"\n🎯 INTEGRATED SEARCH for '{target_word}' ({search_mode} mode)")
         print(f"   Using: {'✓' if use_rhyme_classifier else '✗'} Classifier | "
               f"{'✓' if use_cultural_analysis else '✗'} Cultural | "
               f"{'✓' if use_anti_llm_patterns else '✗'} Anti-LLM")
-        
+
+        if trace:
+            trace.info(
+                "search configuration",
+                search_mode=search_mode,
+                quality_threshold=quality_threshold,
+                max_results=max_results,
+                classifier=int(use_rhyme_classifier),
+                cultural=int(use_cultural_analysis),
+                anti_llm=int(use_anti_llm_patterns),
+            )
+
+        def _trace_block(name: str, **metadata):
+            return trace.time_block(name, **metadata) if trace else nullcontext()
+
         all_matches = []
 
         generator_result: Optional[ComprehensiveRhymeResult] = None
         if use_rhyme_classifier or use_anti_llm_patterns:
             generator_limit = max(40, max_results * 2)
-            generator_result = self.uncommon_generator.generate_comprehensive_rhymes(
-                target_word,
-                max_results=generator_limit,
-                include_rare=use_anti_llm_patterns,
-                include_multiword=use_anti_llm_patterns,
-                include_algorithmic=use_anti_llm_patterns
-            )
+            with _trace_block(
+                "uncommon_generator",
+                include_rare=int(use_anti_llm_patterns),
+                include_multiword=int(use_anti_llm_patterns),
+                include_algorithmic=int(use_anti_llm_patterns),
+                limit=generator_limit,
+            ) as generator_trace:
+                gen_trace = generator_trace if generator_trace else None
+                generator_result = self.uncommon_generator.generate_comprehensive_rhymes(
+                    target_word,
+                    max_results=generator_limit,
+                    include_rare=use_anti_llm_patterns,
+                    include_multiword=use_anti_llm_patterns,
+                    include_algorithmic=use_anti_llm_patterns,
+                    trace_logger=gen_trace,
+                )
+                if gen_trace and generator_result:
+                    gen_trace.info(
+                        "generator output",
+                        candidates=generator_result.statistics.get('total_analyzed', 0),
+                        classified=len(generator_result.classified_rhymes),
+                    )
 
         # 1. RHYME CLASSIFIER INTEGRATION
         if use_rhyme_classifier and generator_result:
-            classifier_matches = [
-                match for match in generator_result.classified_rhymes
-                if match.rhyme_rating >= quality_threshold
-            ]
+            with _trace_block(
+                "rhyme_classifier_filter",
+                candidates=len(generator_result.classified_rhymes),
+            ) as classifier_trace:
+                classifier_matches = [
+                    match for match in generator_result.classified_rhymes
+                    if match.rhyme_rating >= quality_threshold
+                ]
 
-            classifier_matches.sort(key=lambda m: m.quality_score, reverse=True)
-            classifier_matches = classifier_matches[:max_results]
+                classifier_matches.sort(key=lambda m: m.quality_score, reverse=True)
+                classifier_matches = classifier_matches[:max_results]
 
-            all_matches.extend(classifier_matches)
-            print(
-                f"   Rhyme Classifier: {len(classifier_matches)} matches "
-                f"(from {len(generator_result.classified_rhymes)} candidates)"
-            )
+                all_matches.extend(classifier_matches)
+                print(
+                    f"   Rhyme Classifier: {len(classifier_matches)} matches "
+                    f"(from {len(generator_result.classified_rhymes)} candidates)"
+                )
+                if classifier_trace:
+                    classifier_trace.info("selected matches", kept=len(classifier_matches))
 
         # 2. COMPREHENSIVE GENERATOR INTEGRATION
         if use_anti_llm_patterns and generator_result:
@@ -2651,93 +2834,121 @@ class IntegratedRhymeGenerator:
                 generator_result.algorithmic_rhymes
             )
 
-            generator_matches = [
-                match for match in creative_pool
-                if match.rhyme_rating >= quality_threshold
-            ]
+            with _trace_block("generator_filter", pool_size=len(creative_pool)) as generator_filter_trace:
+                generator_matches = [
+                    match for match in creative_pool
+                    if match.rhyme_rating >= quality_threshold
+                ]
 
-            all_matches.extend(generator_matches)
-            print(f"   Comprehensive Generator: {len(generator_matches)} matches")
+                all_matches.extend(generator_matches)
+                print(f"   Comprehensive Generator: {len(generator_matches)} matches")
+                if generator_filter_trace:
+                    generator_filter_trace.info("selected matches", kept=len(generator_matches))
         
         # 3. CULTURAL INTELLIGENCE INTEGRATION
         if use_cultural_analysis and self.enhanced_cultural_searcher:
-            cultural_results = self.enhanced_cultural_searcher.search_with_multi_line_analysis(target_word)
-            unique_cultural_rhymes = self.enhanced_cultural_searcher.extract_unique_rhymes(cultural_results)
-            
-            cultural_matches = []
-            for rhyme_word in unique_cultural_rhymes:
-                if rhyme_word != target_lower:
-                    # Enhanced rating using phonetic engine
-                    phonetic_match = self.phonetic_engine.analyze_phonetic_match(target_word, rhyme_word)
-                    rating = min(100, int(phonetic_match.phonetic_similarity * 100))
-                    
-                    if rating >= quality_threshold:
-                        # Find cultural context
-                        context_info = "Multi-line cultural analysis"
-                        rhyme_scheme = "AABB"  # Default
-                        
-                        for result in cultural_results:
-                            if rhyme_word in result['all_rhymes']:
-                                context_info = f"Found in {result['database']} (scheme: {result['rhyme_scheme']})"
-                                rhyme_scheme = result['rhyme_scheme']
-                                break
-                        
-                        match = RhymeMatch(
-                            word=rhyme_word,
-                            rhyme_rating=rating,
-                            meter=self.phonetic_analyzer.get_meter_pattern(rhyme_word),
-                            popularity=50,
-                            categories=tuple(['Cultural', 'Multi-line', 'Verified']),
-                            cultural_context=context_info,
-                            source_type=SourceType.MULTI_LINE_ANALYSIS,
-                            phonetic_confidence=phonetic_match.phonetic_similarity,
-                            frequency_tier=FrequencyTier.UNCOMMON,
-                            research_notes=f"Multi-line analysis from cultural databases",
-                            multi_line_context=context_info,
-                            rhyme_scheme=rhyme_scheme
-                        )
-                        cultural_matches.append(match)
-            
-            all_matches.extend(cultural_matches)
-            print(f"   Cultural Intelligence: {len(cultural_matches)} matches")
+            with _trace_block(
+                "cultural_analysis",
+                databases=len(self.cultural_databases),
+            ) as cultural_trace:
+                cultural_results = self.enhanced_cultural_searcher.search_with_multi_line_analysis(target_word)
+                unique_cultural_rhymes = self.enhanced_cultural_searcher.extract_unique_rhymes(cultural_results)
+
+                cultural_matches = []
+                for rhyme_word in unique_cultural_rhymes:
+                    if rhyme_word != target_lower:
+                        # Enhanced rating using phonetic engine
+                        phonetic_match = self.phonetic_engine.analyze_phonetic_match(target_word, rhyme_word)
+                        rating = min(100, int(phonetic_match.phonetic_similarity * 100))
+
+                        if rating >= quality_threshold:
+                            # Find cultural context
+                            context_info = "Multi-line cultural analysis"
+                            rhyme_scheme = "AABB"  # Default
+
+                            for result in cultural_results:
+                                if rhyme_word in result['all_rhymes']:
+                                    context_info = f"Found in {result['database']} (scheme: {result['rhyme_scheme']})"
+                                    rhyme_scheme = result['rhyme_scheme']
+                                    break
+
+                            match = RhymeMatch(
+                                word=rhyme_word,
+                                rhyme_rating=rating,
+                                meter=self.phonetic_analyzer.get_meter_pattern(rhyme_word),
+                                popularity=50,
+                                categories=tuple(['Cultural', 'Multi-line', 'Verified']),
+                                cultural_context=context_info,
+                                source_type=SourceType.MULTI_LINE_ANALYSIS,
+                                phonetic_confidence=phonetic_match.phonetic_similarity,
+                                frequency_tier=FrequencyTier.UNCOMMON,
+                                research_notes=f"Multi-line analysis from cultural databases",
+                                multi_line_context=context_info,
+                                rhyme_scheme=rhyme_scheme
+                            )
+                            cultural_matches.append(match)
+
+                all_matches.extend(cultural_matches)
+                print(f"   Cultural Intelligence: {len(cultural_matches)} matches")
+                if cultural_trace:
+                    cultural_trace.info("selected matches", kept=len(cultural_matches))
+        elif use_cultural_analysis and not self.enhanced_cultural_searcher and trace:
+            trace.warning("Cultural analysis requested but no databases available")
         
         # 4. PHONETIC ENGINE INTEGRATION (for enhanced analysis)
         phonetic_matches = []
-        for candidate in self.word_list[:100]:  # Sample for enhanced phonetic analysis
-            if candidate.lower() != target_lower:
-                phonetic_match = self.phonetic_engine.analyze_phonetic_match(target_word, candidate)
-                
-                if phonetic_match.phonetic_similarity > 0.7:  # High threshold for phonetic matches
-                    rating = min(100, int(phonetic_match.phonetic_similarity * 120))  # Boost phonetic matches
-                    
-                    if rating >= quality_threshold:
-                        match = RhymeMatch(
-                            word=candidate,
-                            rhyme_rating=rating,
-                            meter=self.phonetic_analyzer.get_meter_pattern(candidate),
-                            popularity=45,
-                            categories=tuple(['Phonetic', 'Research-backed']),
-                            source_type=SourceType.PHONETIC,
-                            phonetic_confidence=phonetic_match.phonetic_similarity,
-                            frequency_tier=FrequencyTier.COMMON,
-                            research_notes=f"Phonetic engine: similarity={phonetic_match.phonetic_similarity:.2f}, core_match={phonetic_match.rhyme_core_match}"
-                        )
-                        phonetic_matches.append(match)
-        
+        with _trace_block("phonetic_engine_sampling", sample_size=100) as phonetic_trace:
+            for candidate in self.word_list[:100]:  # Sample for enhanced phonetic analysis
+                if candidate.lower() != target_lower:
+                    phonetic_match = self.phonetic_engine.analyze_phonetic_match(target_word, candidate)
+
+                    if phonetic_match.phonetic_similarity > 0.7:  # High threshold for phonetic matches
+                        rating = min(100, int(phonetic_match.phonetic_similarity * 120))  # Boost phonetic matches
+
+                        if rating >= quality_threshold:
+                            match = RhymeMatch(
+                                word=candidate,
+                                rhyme_rating=rating,
+                                meter=self.phonetic_analyzer.get_meter_pattern(candidate),
+                                popularity=45,
+                                categories=tuple(['Phonetic', 'Research-backed']),
+                                source_type=SourceType.PHONETIC,
+                                phonetic_confidence=phonetic_match.phonetic_similarity,
+                                frequency_tier=FrequencyTier.COMMON,
+                                research_notes=f"Phonetic engine: similarity={phonetic_match.phonetic_similarity:.2f}, core_match={phonetic_match.rhyme_core_match}"
+                            )
+                            phonetic_matches.append(match)
+
         all_matches.extend(phonetic_matches)
         print(f"   Phonetic Engine: {len(phonetic_matches)} matches")
+        if trace:
+            trace.info("phonetic sampling matches", count=len(phonetic_matches))
         
         # Remove duplicates and rank
-        unique_matches = self._remove_duplicates_and_rank(all_matches, target_lower)
-        final_matches = unique_matches[:max_results]
+        with _trace_block("deduplicate_and_rank", initial=len(all_matches)) as dedup_trace:
+            unique_matches = self._remove_duplicates_and_rank(all_matches, target_lower)
+            final_matches = unique_matches[:max_results]
+            if dedup_trace:
+                dedup_trace.info(
+                    "ranking summary",
+                    unique=len(unique_matches),
+                    final=len(final_matches),
+                )
         
-        generation_time = (time.time() - start_time) * 1000
+        generation_time = (time.perf_counter() - start_time) * 1000
         
         print(f"   Total unique matches: {len(unique_matches)}")
         print(f"   Final results: {len(final_matches)}")
         print(f"   Generation time: {generation_time:.1f}ms")
         
         self._search_cache[cache_key] = final_matches
+
+        if trace:
+            trace.info(
+                "search complete",
+                total=len(final_matches),
+                elapsed_ms=f"{generation_time:.2f}",
+            )
 
         return final_matches
     
@@ -2775,140 +2986,167 @@ def create_fully_integrated_interface():
                          use_cultural_analysis: bool,
                          use_anti_llm_patterns: bool) -> Tuple[str, List]:
         """Fully integrated search function with all module features"""
-        
-        if not target_word.strip():
+
+        trace_logger: Optional[QueryTraceLogger] = None
+        cleaned_target = target_word.strip()
+
+        if not cleaned_target:
             return "Please enter a word to find rhymes for.", []
-        
+
         try:
-            # Execute integrated search
-            matches = generator.find_fully_integrated_rhymes(
-                target_word=target_word.strip(),
-                search_mode=search_mode.lower(),
+            query_id = format(time.time_ns() & 0xFFFFFFFFFFFF, "x")
+            trace_logger = QueryTraceLogger(logger, cleaned_target, query_id)
+            trace_logger.info(
+                "query received",
+                search_mode=search_mode,
                 quality_threshold=quality_threshold,
                 max_results=max_results,
-                use_rhyme_classifier=use_rhyme_classifier,
-                use_cultural_analysis=use_cultural_analysis,
-                use_anti_llm_patterns=use_anti_llm_patterns
+                classifier=int(use_rhyme_classifier),
+                cultural=int(use_cultural_analysis),
+                anti_llm=int(use_anti_llm_patterns),
             )
-            
+
+            # Execute integrated search
+            with trace_logger.time_block(
+                "find_fully_integrated_rhymes",
+                max_results=max_results,
+            ) as search_trace:
+                matches = generator.find_fully_integrated_rhymes(
+                    target_word=cleaned_target,
+                    search_mode=search_mode.lower(),
+                    quality_threshold=quality_threshold,
+                    max_results=max_results,
+                    use_rhyme_classifier=use_rhyme_classifier,
+                    use_cultural_analysis=use_cultural_analysis,
+                    use_anti_llm_patterns=use_anti_llm_patterns,
+                    trace_logger=search_trace,
+                )
+
+            trace_logger.info("match retrieval complete", matches=len(matches))
+
             # Create comprehensive output
-            output_lines = [f"# 🚀 FULLY INTEGRATED Enhanced Uncommon Rhyme Engine Results for '{target_word}'"]
-            output_lines.append(f"**Search Mode**: {search_mode.title()} | **Results**: {len(matches)} matches")
-            output_lines.append("")
-            
-            # Integration status
-            output_lines.append("## ✅ Integrated Module Features")
-            integration_status = [
-                f"🔬 **Rhyme Classifier**: {'✅ Active' if use_rhyme_classifier else '⏸️ Disabled'} - 6 rhyme types with comprehensive scoring",
-                f"🎵 **Cultural Intelligence**: {'✅ Active' if use_cultural_analysis else '⏸️ Disabled'} - Multi-line rhyme analysis from databases",
-                f"🧠 **Anti-LLM Patterns**: {'✅ Active' if use_anti_llm_patterns else '⏸️ Disabled'} - Specialized rare word algorithms",
-                f"🔊 **Phonetic Engine**: ✅ Always Active - Research-backed acoustic similarity matrices",
-                f"📊 **Performance**: All algorithms integrated with original app features"
-            ]
-            output_lines.extend(integration_status)
-            output_lines.append("")
-            
-            # Results breakdown by source
-            source_counts = Counter(match.source_type.value for match in matches)
-            
-            output_lines.append("## 📊 Results by Integration Source")
-            for source, count in source_counts.most_common():
-                source_display = source.replace('_', ' ').title()
-                output_lines.append(f"- **{source_display}**: {count} matches")
-            output_lines.append("")
-            
-            # Rhyme type analysis (if classifier used)
-            if use_rhyme_classifier:
-                rhyme_type_counts = Counter(str(match.rhyme_type.value) for match in matches if match.rhyme_type)
-                if rhyme_type_counts:
-                    output_lines.append("## 🎯 Rhyme Type Analysis")
-                    for rhyme_type, count in rhyme_type_counts.most_common():
-                        output_lines.append(f"- **{rhyme_type.title()}**: {count} matches")
-                    output_lines.append("")
-            
-            # Cultural analysis summary (if used)
-            if use_cultural_analysis:
-                cultural_matches = [m for m in matches if m.source_type == SourceType.MULTI_LINE_ANALYSIS]
-                if cultural_matches:
-                    output_lines.append("## 🎨 Cultural Intelligence Summary")
-                    scheme_counts = Counter(match.rhyme_scheme for match in cultural_matches if match.rhyme_scheme)
-                    for scheme, count in scheme_counts.most_common():
-                        output_lines.append(f"- **{scheme} Scheme**: {count} matches")
-                    output_lines.append("")
-            
-            # Top matches
-            output_lines.append("## 🏆 Top Integrated Results")
-            for i, match in enumerate(matches[:15], 1):
-                # Enhanced display with integration info
-                source_info = match.source_type.value.replace('_', ' ').title()
-                
-                # Add specific integration details
-                integration_details = []
-                if match.rhyme_type:
-                    integration_details.append(f"Type: {match.rhyme_type.value}")
-                if match.multi_line_context:
-                    integration_details.append("Multi-line")
-                if match.rhyme_scheme:
-                    integration_details.append(f"Scheme: {match.rhyme_scheme}")
-                if match.frequency_tier == FrequencyTier.RARE:
-                    integration_details.append("RARE")
-                
-                detail_str = " | ".join(integration_details) if integration_details else ""
-                
-                output_lines.append(f"{i}. **{match.word}** (Rating: {match.rhyme_rating}, Quality: {match.quality_score:.1f})")
-                output_lines.append(f"   Source: {source_info} | {detail_str}")
-                if match.cultural_context:
-                    output_lines.append(f"   Cultural: {match.cultural_context}")
-            
-            # Integration advantages
-            output_lines.append("")
-            output_lines.append("## 🎯 Fully Integrated Advantages")
-            advantages = [
-                "🔬 **Complete Rhyme Classification**: 6 distinct rhyme types with semantic analysis",
-                "🎵 **Multi-line Cultural Analysis**: Extract rhymes from full lyric contexts with scheme detection",
-                "🧠 **Anti-LLM Specialization**: Target documented weaknesses in rare word processing",
-                "🔊 **Research-backed Phonetics**: Acoustic similarity matrices from phonological studies",
-                "⚡ **Performance Optimized**: All module features integrated with app's caching system",
-                "📊 **Comprehensive Quality**: Enhanced scoring incorporating all analysis types"
-            ]
-            output_lines.extend(advantages)
-            
-            main_output = "\n".join(output_lines)
-            
-            # Create enhanced table data
-            table_data = []
-            for match in matches:
-                # Enhanced display
-                source_display = match.source_type.value.replace('_', ' ').title()
-                
-                # Integration-specific columns
-                rhyme_type_display = match.rhyme_type.value if match.rhyme_type else "N/A"
-                cultural_display = match.cultural_context or match.multi_line_context or "N/A"
-                if len(cultural_display) > 40:
-                    cultural_display = cultural_display[:40] + "..."
-                
-                categories_display = ", ".join(match.categories[:3])
-                if "Verified" in match.categories:
-                    categories_display = "✅ " + categories_display
-                
-                table_data.append([
-                    match.word,
-                    match.rhyme_rating,
-                    f"{match.quality_score:.1f}",
-                    rhyme_type_display,
-                    match.rhyme_scheme or "N/A",
-                    source_display,
-                    f"{match.phonetic_confidence:.2f}" if match.phonetic_confidence > 0 else "N/A",
-                    match.frequency_tier.value,
-                    categories_display,
-                    cultural_display
-                ])
-            
+            with trace_logger.time_block("render_output", matches=len(matches)):
+                output_lines = [f"# 🚀 FULLY INTEGRATED Enhanced Uncommon Rhyme Engine Results for '{cleaned_target}'"]
+                output_lines.append(f"**Search Mode**: {search_mode.title()} | **Results**: {len(matches)} matches")
+                output_lines.append("")
+
+                # Integration status
+                output_lines.append("## ✅ Integrated Module Features")
+                integration_status = [
+                    f"🔬 **Rhyme Classifier**: {'✅ Active' if use_rhyme_classifier else '⏸️ Disabled'} - 6 rhyme types with comprehensive scoring",
+                    f"🎵 **Cultural Intelligence**: {'✅ Active' if use_cultural_analysis else '⏸️ Disabled'} - Multi-line rhyme analysis from databases",
+                    f"🧠 **Anti-LLM Patterns**: {'✅ Active' if use_anti_llm_patterns else '⏸️ Disabled'} - Specialized rare word algorithms",
+                    f"🔊 **Phonetic Engine**: ✅ Always Active - Research-backed acoustic similarity matrices",
+                    f"📊 **Performance**: All algorithms integrated with original app features"
+                ]
+                output_lines.extend(integration_status)
+                output_lines.append("")
+
+                # Results breakdown by source
+                source_counts = Counter(match.source_type.value for match in matches)
+
+                output_lines.append("## 📊 Results by Integration Source")
+                for source, count in source_counts.most_common():
+                    source_display = source.replace('_', ' ').title()
+                    output_lines.append(f"- **{source_display}**: {count} matches")
+                output_lines.append("")
+
+                # Rhyme type analysis (if classifier used)
+                if use_rhyme_classifier:
+                    rhyme_type_counts = Counter(str(match.rhyme_type.value) for match in matches if match.rhyme_type)
+                    if rhyme_type_counts:
+                        output_lines.append("## 🎯 Rhyme Type Analysis")
+                        for rhyme_type, count in rhyme_type_counts.most_common():
+                            output_lines.append(f"- **{rhyme_type.title()}**: {count} matches")
+                        output_lines.append("")
+
+                # Cultural analysis summary (if used)
+                if use_cultural_analysis:
+                    cultural_matches = [m for m in matches if m.source_type == SourceType.MULTI_LINE_ANALYSIS]
+                    if cultural_matches:
+                        output_lines.append("## 🎨 Cultural Intelligence Summary")
+                        scheme_counts = Counter(match.rhyme_scheme for match in cultural_matches if match.rhyme_scheme)
+                        for scheme, count in scheme_counts.most_common():
+                            output_lines.append(f"- **{scheme} Scheme**: {count} matches")
+                        output_lines.append("")
+
+                # Top matches
+                output_lines.append("## 🏆 Top Integrated Results")
+                for i, match in enumerate(matches[:15], 1):
+                    # Enhanced display with integration info
+                    source_info = match.source_type.value.replace('_', ' ').title()
+
+                    # Add specific integration details
+                    integration_details = []
+                    if match.rhyme_type:
+                        integration_details.append(f"Type: {match.rhyme_type.value}")
+                    if match.multi_line_context:
+                        integration_details.append("Multi-line")
+                    if match.rhyme_scheme:
+                        integration_details.append(f"Scheme: {match.rhyme_scheme}")
+                    if match.frequency_tier == FrequencyTier.RARE:
+                        integration_details.append("RARE")
+
+                    detail_str = " | ".join(integration_details) if integration_details else ""
+
+                    output_lines.append(f"{i}. **{match.word}** (Rating: {match.rhyme_rating}, Quality: {match.quality_score:.1f})")
+                    output_lines.append(f"   Source: {source_info} | {detail_str}")
+                    if match.cultural_context:
+                        output_lines.append(f"   Cultural: {match.cultural_context}")
+
+                # Integration advantages
+                output_lines.append("")
+                output_lines.append("## 🎯 Fully Integrated Advantages")
+                advantages = [
+                    "🔬 **Complete Rhyme Classification**: 6 distinct rhyme types with semantic analysis",
+                    "🎵 **Multi-line Cultural Analysis**: Extract rhymes from full lyric contexts with scheme detection",
+                    "🧠 **Anti-LLM Specialization**: Target documented weaknesses in rare word processing",
+                    "🔊 **Research-backed Phonetics**: Acoustic similarity matrices from phonological studies",
+                    "⚡ **Performance Optimized**: All module features integrated with app's caching system",
+                    "📊 **Comprehensive Quality**: Enhanced scoring incorporating all analysis types"
+                ]
+                output_lines.extend(advantages)
+
+                main_output = "\n".join(output_lines)
+
+                # Create enhanced table data
+                table_data = []
+                for match in matches:
+                    # Enhanced display
+                    source_display = match.source_type.value.replace('_', ' ').title()
+
+                    # Integration-specific columns
+                    rhyme_type_display = match.rhyme_type.value if match.rhyme_type else "N/A"
+                    cultural_display = match.cultural_context or match.multi_line_context or "N/A"
+                    if len(cultural_display) > 40:
+                        cultural_display = cultural_display[:40] + "..."
+
+                    categories_display = ", ".join(match.categories[:3])
+                    if "Verified" in match.categories:
+                        categories_display = "✅ " + categories_display
+
+                    table_data.append([
+                        match.word,
+                        match.rhyme_rating,
+                        f"{match.quality_score:.1f}",
+                        rhyme_type_display,
+                        match.rhyme_scheme or "N/A",
+                        source_display,
+                        f"{match.phonetic_confidence:.2f}" if match.phonetic_confidence > 0 else "N/A",
+                        match.frequency_tier.value,
+                        categories_display,
+                        cultural_display
+                    ])
+
+            trace_logger.info("response prepared", rows=len(matches))
+
             return main_output, table_data
-            
+
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
+            if trace_logger:
+                trace_logger.exception("query failed", error=str(e))
             return f"Error during integrated search: {str(e)}\n\nDetails:\n{error_details}", []
     
     # Create Gradio interface
